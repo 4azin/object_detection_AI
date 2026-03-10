@@ -1,0 +1,128 @@
+# =============================================================
+#  image_pjt_test - Root .gitignore
+# =============================================================
+
+# =============================================
+#  Python 공통
+# =============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# =============================================
+#  모델 가중치 (대용량 바이너리 — Git 제외)
+# =============================================
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.tflite
+*.engine
+*.torchscript
+
+# =============================================
+#  데이터셋 (대용량 이미지/라벨)
+# =============================================
+kaggle_underwater_dataset/data/aquarium_pretrain/
+kaggle_underwater_dataset/data/aquarium_single_class/
+
+# =============================================
+#  학습/추론 결과물
+# =============================================
+kaggle_underwater_dataset/eval/checkpoints/
+kaggle_underwater_dataset/eval/results/
+kaggle_underwater_dataset/eval/user_input.png
+CFD_fishial/results/
+CFD_fishial/test_videos/
+zeroshot_test/output_frames/
+zeroshot_test/temp_frames/
+
+# =============================================
+#  영상/이미지 출력물
+# =============================================
+*.mp4
+*.mov
+*.avi
+zeroshot_test/temp_gradio_upload.jpg
+
+# =============================================
+#  Jupyter Notebook (대용량 출력 포함)
+# =============================================
+.ipynb_checkpoints/
+kaggle_underwater_dataset/underwater-object-detection.ipynb
+
+# =============================================
+#  로그 파일
+# =============================================
+*.log
+sg_logs/
+
+# =============================================
+#  보안 / 환경변수
+# =============================================
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.secret
+credentials/
+secrets/
+
+# =============================================
+#  IDE / 에디터
+# =============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# =============================================
+#  OS 생성 파일
+# =============================================
+Thumbs.db
+Desktop.ini
+.DS_Store
+__MACOSX/
+*.tmp
+
+# =============================================
+#  가상환경
+# =============================================
+venv/
+.venv/
+env/
+.conda/
+
+# =============================================
+#  TensorBoard
+# =============================================
+events.out.tfevents.*
+
+# =============================================
+#  Gradio / 임시 업로드
+# =============================================
+flagged/
+
+# =============================================
+#  추가 테스트 디렉토리 (Upscale, Bio Geo 등)
+# =============================================
+upscale_test/result_image/
+upscale_test/test_image/
+upscale_test/weights/
+checking_bio_geo_test/result/
+checking_bio_geo_test/*.json
+
+# =============================================
+#  GMS_test - AI Logbook History
+# =============================================
+GMS_test/history/

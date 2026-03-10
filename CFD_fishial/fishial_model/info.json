@@ -1,0 +1,12 @@
+{
+    "version": 10.0,
+    "num_of_class": 755,
+    "date": "29-01-2026",
+    "author": "Codahead@Andrew",
+    "database_size": 64445,
+    "samples_per_class": 100,
+    "val_samples": 18654,
+    "accuracy_arcface": 0.9498,
+    "accuracy_knn": 0.9552,
+    "top5_accuracy_arcface": 0.9922
+}
