@@ -200,6 +200,106 @@ def step1_extract(
     return gallery_items, summary, gpu_html, str(extractor.best_shots_dir), tracked_video, zip_path
 
 
+def step1_extract_image(
+    image,
+    conf_threshold: float,
+    use_fp16: bool,
+    progress=gr.Progress(track_tqdm=True),
+):
+    """Image upload -> YOLO detect -> Best-Shot extraction."""
+    global _last_best_shots_dir
+
+    if image is None:
+        raise gr.Error("Please upload an image.")
+
+    extractor = _get_extractor()
+
+    # Override config with UI values
+    extractor.config["tracker"]["confidence_threshold"] = conf_threshold
+    extractor.config["model"]["half"] = use_fp16
+
+    # Use persistent results directory (timestamped subfolder)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("results") / "best_shots" / f"image_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    extractor.best_shots_dir = run_dir
+    extractor.output_dir = Path("results")
+
+    _last_best_shots_dir = str(extractor.best_shots_dir)
+
+    # Convert PIL Image to BGR for OpenCV
+    img_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+
+    results = extractor.model.predict(
+        source=img_bgr,
+        conf=conf_threshold,
+        iou=extractor.config["model"]["iou_threshold"],
+        imgsz=extractor.config["model"]["img_size"],
+        half=use_fp16,
+        device=extractor.device,
+        verbose=False,
+    )
+
+    result = results[0]
+    boxes = result.boxes
+    best_shots = {}
+    
+    # Assign dummy track IDs
+    if boxes is not None and len(boxes) > 0:
+        for i in range(len(boxes)):
+            tid = i
+            conf = float(boxes.conf[i].item())
+            xyxy = boxes.xyxy[i].cpu().numpy().astype(int)
+
+            x1, y1, x2, y2 = xyxy
+            h, w = img_bgr.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 > x1 and y2 > y1:
+                crop = img_bgr[y1:y2, x1:x2].copy()
+                best_shots[tid] = {
+                    "conf": conf,
+                    "crop": crop,
+                    "frame_id": 0,
+                }
+
+    rendered = result.plot(img=img_bgr.copy())
+    rendered_rgb = cv2.cvtColor(rendered, cv2.COLOR_BGR2RGB)
+
+    # --- Safeguard: Dedup (skip merge since it's a single frame) ---
+    from deduplicator import EmbeddingDeduplicator
+    safeguard = extractor.config.get("safeguard", {})
+    emb_thresh = safeguard.get("embedding_similarity_threshold", 0.85)
+
+    dedup = EmbeddingDeduplicator(
+        config_path="config.yaml", similarity_threshold=emb_thresh
+    )
+    filtered, removed = dedup.deduplicate_best_shots(best_shots)
+    saved = extractor._save_best_shots(filtered, "image", 30.0)
+    dedup.cleanup()
+
+    _last_best_shots_dir = str(extractor.best_shots_dir)
+
+    gallery_items = []
+    for tid in sorted(saved.keys()):
+        data = saved[tid]
+        img_path = data["path"]
+        crop_img = cv2.imread(img_path)
+        if crop_img is not None:
+            crop_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
+            label = f"Obj {tid} | Conf: {data['conf']:.3f}"
+            gallery_items.append((crop_rgb, label))
+
+    # Summary HTML (with dedup stats)
+    n_raw = len(best_shots)
+    n_final = len(saved)
+    summary = _build_extraction_summary(saved, "image_upload", n_raw, len(removed))
+    gpu_html = _build_gpu_info_html()
+    zip_path = _create_best_shot_zip(extractor.best_shots_dir)
+
+    return gallery_items, summary, gpu_html, str(extractor.best_shots_dir), rendered_rgb, zip_path
+
+
 def _create_best_shot_zip(best_shots_dir: Path) -> Optional[str]:
     """Best-shot 폴더를 ZIP으로 압축하여 다운로드 경로를 반환한다."""
     best_shots_dir = Path(best_shots_dir)
@@ -511,62 +611,123 @@ def create_ui() -> gr.Blocks:
             # Tab 1: Video -> Best-Shot Extraction
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             with gr.Tab("Step 1: Tracking & Best-Shot"):
-                with gr.Row(equal_height=False):
-                    with gr.Column(scale=1):
-                        gr.Markdown("### Upload Video")
-                        video_input = gr.Video(
-                            label="Dive Video",
-                            sources=["upload"],
-                        )
-                        with gr.Accordion("Model Settings", open=True):
-                            conf_slider = gr.Slider(
-                                0.1, 0.9, value=0.5, step=0.05,
-                                label="Tracking Confidence",
-                                info="ByteTrack conf threshold",
-                            )
-                            fp16_check = gr.Checkbox(
-                                value=True, label="FP16 (RTX 4070)",
-                            )
-                        extract_btn = gr.Button(
-                            "Start Tracking & Extraction",
-                            variant="primary", size="lg",
-                        )
-                        download_btn = gr.Button(
-                            "📦 Download All Best Shots (ZIP)",
-                            variant="secondary", size="lg",
-                        )
-                        zip_download = gr.File(
-                            label="Download ZIP",
-                            visible=True,
-                        )
-                        gpu_info_1 = gr.HTML(value=_build_gpu_info_html())
-
-                    with gr.Column(scale=2):
-                        extract_summary = gr.HTML(label="Extraction Summary")
-                        with gr.Tabs():
-                            with gr.Tab("Tracked Video"):
-                                tracked_video_output = gr.Video(
-                                    label="Tracking Result (Bounding Boxes + IDs)",
+                with gr.Tabs():
+                    with gr.Tab("Video Tracking"):
+                        with gr.Row(equal_height=False):
+                            with gr.Column(scale=1):
+                                gr.Markdown("### Upload Video")
+                                video_input = gr.Video(
+                                    label="Dive Video",
+                                    sources=["upload"],
                                 )
-                            with gr.Tab("Best-Shot Gallery"):
-                                extract_gallery = gr.Gallery(
-                                    label="Extracted Best Shots (per tracked ID)",
-                                    columns=4,
-                                    height=460,
-                                    object_fit="contain",
+                                with gr.Accordion("Model Settings", open=True):
+                                    conf_slider = gr.Slider(
+                                        0.1, 0.9, value=0.5, step=0.05,
+                                        label="Tracking Confidence",
+                                        info="ByteTrack conf threshold",
+                                    )
+                                    fp16_check = gr.Checkbox(
+                                        value=True, label="FP16 (RTX 4070)",
+                                    )
+                                extract_btn = gr.Button(
+                                    "Start Tracking & Extraction",
+                                    variant="primary", size="lg",
                                 )
+                                download_btn = gr.Button(
+                                    "📦 Download All Best Shots (ZIP)",
+                                    variant="secondary", size="lg",
+                                )
+                                zip_download = gr.File(
+                                    label="Download ZIP",
+                                    visible=True,
+                                )
+                                gpu_info_1 = gr.HTML(value=_build_gpu_info_html())
 
-                extract_btn.click(
-                    fn=step1_extract,
-                    inputs=[video_input, conf_slider, fp16_check],
-                    outputs=[extract_gallery, extract_summary, gpu_info_1, best_shots_state, tracked_video_output, zip_download],
-                )
+                            with gr.Column(scale=2):
+                                extract_summary = gr.HTML(label="Extraction Summary")
+                                with gr.Tabs():
+                                    with gr.Tab("Tracked Video"):
+                                        tracked_video_output = gr.Video(
+                                            label="Tracking Result (Bounding Boxes + IDs)",
+                                        )
+                                    with gr.Tab("Best-Shot Gallery"):
+                                        extract_gallery = gr.Gallery(
+                                            label="Extracted Best Shots (per tracked ID)",
+                                            columns=4,
+                                            height=460,
+                                            object_fit="contain",
+                                        )
 
-                download_btn.click(
-                    fn=step1_download_zip,
-                    inputs=[best_shots_state],
-                    outputs=[zip_download],
-                )
+                        extract_btn.click(
+                            fn=step1_extract,
+                            inputs=[video_input, conf_slider, fp16_check],
+                            outputs=[extract_gallery, extract_summary, gpu_info_1, best_shots_state, tracked_video_output, zip_download],
+                        )
+
+                        download_btn.click(
+                            fn=step1_download_zip,
+                            inputs=[best_shots_state],
+                            outputs=[zip_download],
+                        )
+                    
+                    with gr.Tab("Image Detection"):
+                        with gr.Row(equal_height=False):
+                            with gr.Column(scale=1):
+                                gr.Markdown("### Upload Image")
+                                image_input = gr.Image(
+                                    type="pil",
+                                    label="Dive Image",
+                                    sources=["upload"],
+                                )
+                                with gr.Accordion("Model Settings", open=True):
+                                    img_conf_slider = gr.Slider(
+                                        0.1, 0.9, value=0.5, step=0.05,
+                                        label="Detection Confidence",
+                                        info="YOLO conf threshold",
+                                    )
+                                    img_fp16_check = gr.Checkbox(
+                                        value=True, label="FP16 (RTX 4070)",
+                                    )
+                                img_extract_btn = gr.Button(
+                                    "Start Detection & Extraction",
+                                    variant="primary", size="lg",
+                                )
+                                img_download_btn = gr.Button(
+                                    "📦 Download All Objects (ZIP)",
+                                    variant="secondary", size="lg",
+                                )
+                                img_zip_download = gr.File(
+                                    label="Download ZIP",
+                                    visible=True,
+                                )
+                                img_gpu_info_1 = gr.HTML(value=_build_gpu_info_html())
+
+                            with gr.Column(scale=2):
+                                img_extract_summary = gr.HTML(label="Extraction Summary")
+                                with gr.Tabs():
+                                    with gr.Tab("Detected Image"):
+                                        detected_image_output = gr.Image(
+                                            label="Detection Result (Bounding Boxes)",
+                                        )
+                                    with gr.Tab("Object Gallery"):
+                                        img_extract_gallery = gr.Gallery(
+                                            label="Extracted Objects",
+                                            columns=4,
+                                            height=460,
+                                            object_fit="contain",
+                                        )
+
+                        img_extract_btn.click(
+                            fn=step1_extract_image,
+                            inputs=[image_input, img_conf_slider, img_fp16_check],
+                            outputs=[img_extract_gallery, img_extract_summary, img_gpu_info_1, best_shots_state, detected_image_output, img_zip_download],
+                        )
+
+                        img_download_btn.click(
+                            fn=step1_download_zip,
+                            inputs=[best_shots_state],
+                            outputs=[img_zip_download],
+                        )
 
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # Tab 2: BioCLIP-2 Classification
