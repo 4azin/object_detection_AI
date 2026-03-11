@@ -27,19 +27,12 @@ tracker:
   confidence_threshold: 0.5
   best_shots_dir: "./results/best_shots"
 
-# --- Module B: Fishial.AI Classifier ---
+# --- Module B: BioCLIP-2 Classifier ---
 classifier:
-  checkpoint_path: "./fishial_model/model.ckpt"
-  database_path: "./fishial_model/database.pt"
-  backbone_model_name: "maxvit_base_tf_224"
-  embedding_dim: 512
-  num_classes: 775 # actual checkpoint shape (info.json says 755, but model.ckpt has 775)
-  arcface_s: 64.0
-  arcface_m: 0.2
-  pooling_type: "attention"
-  input_size: 224
+  model_str: "hf-hub:imageomics/bioclip-2"
+  tokenizer_str: "ViT-L-14"
+  hf_data_str: "imageomics/TreeOfLife-200M"
   device: "cuda:0"
-  use_knn: true
   topk_results: 3
   csv_filename: "classification_log.csv"
 

@@ -1,5 +1,5 @@
 """
-Divery Vision Pipeline - Module B: Fishial.AI Classifier 실행
+Divery Vision Pipeline - Module B: BioCLIP-2 Classifier 실행
 =============================================================
 사용법:
     conda activate diveary-vision
@@ -20,7 +20,7 @@ from classifier_tester import ClassifierTester
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Divery Module B - Fishial.AI Classifier Test",
+        description="Divery Module B - BioCLIP-2 Classifier Test",
     )
     parser.add_argument(
         "--config", type=str, default="config.yaml",
@@ -37,7 +37,7 @@ def main() -> None:
     args = parse_args()
 
     print("=" * 60)
-    print("[Divery] Module B: Fishial.AI Classifier Test")
+    print("[Divery] Module B: BioCLIP-2 Classifier Test")
     print("=" * 60)
 
     tester = ClassifierTester(config_path=args.config)

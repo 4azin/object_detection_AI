@@ -1,65 +1,108 @@
 """
-Divery Vision Pipeline - Module B: Fishial.AI Classifier Tester
+Divery Vision Pipeline - Module B: BioCLIP-2 Classifier Tester
 ===============================================================
-Fishial.AI v10.0 (755 Classes) 임베딩 기반 어종 분류기 독립 테스트 모듈.
-ArcFace + kNN(FAISS) 하이브리드 추론 방식 사용.
+BioCLIP-2 (TreeOfLife-200M) 기반 어종 분류기 독립 테스트 모듈.
 """
 
 import csv
+import json
+import os
 import sys
 import time
+import collections
+import heapq
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
+from PIL import Image
 from tqdm import tqdm
+from torchvision import transforms
+from huggingface_hub import hf_hub_download
 
-# fishial_model/ 내 inference.py를 직접 임포트
-sys.path.insert(0, str(Path(__file__).parent / "fishial_model"))
-from inference import EmbeddingClassifier  # noqa: E402
+try:
+    from open_clip import create_model, get_tokenizer
+except ImportError:
+    print("❌ open_clip_torch is not installed. pip install open_clip_torch")
+    sys.exit(1)
 
 
 class ClassifierTester:
     """
-    Fishial.AI 임베딩 분류기 독립 테스트 클래스.
-
-    주요 기능:
-        - Fishial.AI v10.0 모델 (model.ckpt + database.pt) 로드
-        - 이미지 폴더 내 물고기 크롭 이미지를 순회하며 Top-3 종 분류
-        - classification_log.csv 출력
-        - GPU 메모리 관리
+    BioCLIP-2 임베딩 분류기 클래스.
     """
 
     def __init__(self, config_path: str = "config.yaml") -> None:
         self.config = self._load_config(config_path)
-        cls_cfg = self.config["classifier"]
+        cls_cfg = self.config.get("classifier", {})
 
-        # EmbeddingClassifier config 빌드
-        self.ec_config = self._build_ec_config(cls_cfg)
+        print("[ClassifierTester] Loading BioCLIP-2 model...")
+        self.device = torch.device(cls_cfg.get("device", "cuda:0") if torch.cuda.is_available() else "cpu")
+        self.model_str = cls_cfg.get("model_str", "hf-hub:imageomics/bioclip-2")
+        self.tokenizer_str = cls_cfg.get("tokenizer_str", "ViT-L-14")
+        self.hf_data_str = cls_cfg.get("hf_data_str", "imageomics/TreeOfLife-200M")
 
-        print("[ClassifierTester] Loading Fishial.AI model...")
-        self.classifier = EmbeddingClassifier(self.ec_config)
+        self.model = create_model(self.model_str, output_dict=True, require_pretrained=True)
+        self.model = self.model.to(self.device)
+        self.model.eval()
+
+        # Image preprocessing
+        self.preprocess = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Resize((224, 224), antialias=True),
+            transforms.Normalize(
+                mean=(0.48145466, 0.4578275, 0.40821073),
+                std=(0.26862954, 0.26130258, 0.27577711),
+            ),
+        ])
+
+        self.tokenizer = get_tokenizer(self.tokenizer_str)
+        self.templates = [
+            lambda c: f"a photo of a {c}.",
+            lambda c: f"a photo of the {c}.",
+            lambda c: f"a photo of my {c}.",
+            lambda c: f"a close-up photo of a {c}.",
+            lambda c: f"a bright photo of a {c}.",
+            lambda c: f"a dark photo of a {c}.",
+            lambda c: f"a photo of a large {c}.",
+            lambda c: f"a photo of a small {c}.",
+        ]
+
+        print("[ClassifierTester] Downloading TreeOfLife-200M embeddings...")
+        self.txt_emb = torch.from_numpy(np.load(hf_hub_download(
+            repo_id=self.hf_data_str,
+            filename="embeddings/txt_emb_species.npy",
+            repo_type="dataset",
+        ))).to(self.device)
+
+        with open(hf_hub_download(
+            repo_id=self.hf_data_str,
+            filename="embeddings/txt_emb_species.json",
+            repo_type="dataset",
+        ), encoding="utf-8") as fd:
+            self.txt_names = json.load(fd)
 
         # Warmup for stable GPU timing
         print("[ClassifierTester] GPU warmup...")
-        self.classifier.warmup(num_iterations=3)
+        self._warmup()
 
         self.topk = cls_cfg.get("topk_results", 3)
-        self.output_dir = Path(self.config["output"]["output_dir"])
+        self.output_dir = Path(self.config.get("output", {}).get("output_dir", "./results"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"[ClassifierTester] Initialized")
-        print(f"  - Classes  : {cls_cfg['num_classes']}")
-        print(f"  - Device   : {cls_cfg['device']}")
+        print(f"  - Device   : {self.device}")
         print(f"  - Top-K    : {self.topk}")
-        print(f"  - kNN      : {cls_cfg.get('use_knn', True)}")
 
-    # ------------------------------------------------------------------
-    # Init helpers
-    # ------------------------------------------------------------------
+    def _warmup(self, num_iterations=3):
+        dummy_input = torch.randn(1, 3, 224, 224).to(self.device)
+        with torch.no_grad():
+            for _ in range(num_iterations):
+                self.model.encode_image(dummy_input)
 
     @staticmethod
     def _load_config(config_path: str) -> dict:
@@ -70,66 +113,61 @@ class ClassifierTester:
             return yaml.safe_load(f)
 
     @staticmethod
-    def _build_ec_config(cls_cfg: dict) -> dict:
-        """ClassifierTester용 config를 EmbeddingClassifier용 dict로 변환."""
-        return {
-            "log_level": "INFO",
-            "dataset": {
-                "path": cls_cfg["database_path"],
-            },
-            "model": {
-                "checkpoint_path": cls_cfg["checkpoint_path"],
-                "backbone_model_name": cls_cfg.get("backbone_model_name", "maxvit_base_tf_224"),
-                "embedding_dim": cls_cfg.get("embedding_dim", 512),
-                "num_classes": cls_cfg.get("num_classes", 755),
-                "arcface_s": cls_cfg.get("arcface_s", 64.0),
-                "arcface_m": cls_cfg.get("arcface_m", 0.2),
-                "pooling_type": cls_cfg.get("pooling_type", "attention"),
-                "input_size": cls_cfg.get("input_size", 224),
-                "device": cls_cfg.get("device", "cuda:0"),
-            },
-            "use_knn": cls_cfg.get("use_knn", True),
-        }
+    def format_name(taxon, common):
+        taxon_str = " ".join(taxon)
+        if not common:
+            return taxon_str
+        return f"{taxon_str} ({common})"
 
-    # ------------------------------------------------------------------
-    # Core: Classification
-    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def get_txt_features(self, classnames):
+        all_features = []
+        for classname in classnames:
+            txts = [template(classname) for template in self.templates]
+            txts = self.tokenizer(txts).to(self.device)
+            txt_features = self.model.encode_text(txts)
+            txt_features = F.normalize(txt_features, dim=-1).mean(dim=0)
+            txt_features /= txt_features.norm()
+            all_features.append(txt_features)
+        return torch.stack(all_features, dim=1)
 
-    def run(self, image_dir: str) -> list[dict]:
-        """
-        이미지 폴더 내 모든 이미지에 대해 종 분류를 수행한다.
-
-        Args:
-            image_dir: 이미지 폴더 경로 (best_shots/ 등).
-
-        Returns:
-            분류 결과 딕셔너리 리스트.
-        """
+    def run(self, image_dir: str, mode: str = "open-domain", custom_classes: Optional[list[str]] = None) -> list[dict]:
         image_dir = Path(image_dir)
         if not image_dir.exists():
-            raise FileNotFoundError(f"Image dir not found: {image_dir}")
+            print(f"[WARNING] Image dir not found: {image_dir}")
+            return []
 
-        # 지원 확장자 이미지 수집
         extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-        image_files = sorted(
-            f for f in image_dir.iterdir()
-            if f.suffix.lower() in extensions
-        )
+        image_files = sorted(f for f in image_dir.iterdir() if f.suffix.lower() in extensions)
 
         if not image_files:
             print(f"[WARNING] No images found in: {image_dir}")
             return []
 
         print(f"\n{'='*60}")
-        print(f"[Classification] Fishial.AI v10.0")
+        print(f"[Classification] BioCLIP-2 ({mode})")
         print(f"  Images: {len(image_files)} | Top-K: {self.topk}")
+        
+        target_txt_emb = self.txt_emb
+        target_names = self.txt_names
+        
+        if mode == "zero-shot":
+            if not custom_classes:
+                print("[WARNING] Zero-shot mode requires custom_classes. Falling back to open-domain.")
+                mode = "open-domain"
+            else:
+                print(f"  Classes: {len(custom_classes)} custom species")
+                target_txt_emb = self.get_txt_features(custom_classes)
+                # Store names as tuple similar to JSON format (e.g. ['Amphiprion ocellaris'], '')
+                target_names = [([cls], "") for cls in custom_classes]
+
         print(f"{'='*60}")
 
         results: list[dict] = []
 
         with tqdm(image_files, desc="[Classify]", unit="img") as pbar:
             for img_path in pbar:
-                result = self._classify_single(img_path)
+                result = self._classify_single(img_path, target_txt_emb, target_names)
                 if result is not None:
                     results.append(result)
                     pbar.set_postfix(
@@ -137,41 +175,31 @@ class ClassifierTester:
                         conf=f"{result.get('Top1_Prob', 0):.3f}",
                     )
 
-        # CSV 저장
-        csv_name = self.config["classifier"].get(
-            "csv_filename", "classification_log.csv"
-        )
+        csv_name = self.config.get("classifier", {}).get("csv_filename", "classification_log.csv")
         csv_path = self.output_dir / csv_name
         self._save_csv(results, csv_path)
-
         self._print_summary(results)
         return results
 
-    # ------------------------------------------------------------------
-    # Single image classification
-    # ------------------------------------------------------------------
-
-    def _classify_single(self, img_path: Path) -> Optional[dict]:
-        """
-        단일 이미지에 대해 Top-K 분류를 수행한다.
-
-        Returns:
-            결과 딕셔너리 or None (실패 시).
-        """
+    @torch.no_grad()
+    def _classify_single(self, img_path: Path, target_txt_emb: torch.Tensor, target_names: list) -> Optional[dict]:
         try:
-            # BGR -> RGB
-            img_bgr = cv2.imread(str(img_path))
-            if img_bgr is None:
-                print(f"  [SKIP] Cannot read: {img_path.name}")
-                return None
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-            # 추론 시간 측정
+            img_pil = Image.open(img_path).convert("RGB")
+            
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
             t_start = time.perf_counter()
 
-            predictions = self.classifier(img_rgb)
+            img_tensor = self.preprocess(img_pil).to(self.device)
+            img_features = self.model.encode_image(img_tensor.unsqueeze(0))
+            img_features = F.normalize(img_features, dim=-1)
+
+            logits = (self.model.logit_scale.exp() * img_features @ target_txt_emb).squeeze()
+            probs = F.softmax(logits, dim=0)
+
+            # Prevent error if topk exceeds number of classes
+            k = min(self.topk, len(probs))
+            topk_res = probs.topk(k)
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -179,18 +207,29 @@ class ClassifierTester:
 
             inference_ms = (t_end - t_start) * 1000
 
-            # Top-K 결과 빌드
             row: dict = {"Image_Name": img_path.name}
+            
+            if k == 1 and logits.dim() == 0:
+                # Edge case for a single class
+                row[f"Top1_Species"] = self.format_name(*target_names[0])
+                row[f"Top1_Prob"] = round(probs.item(), 4)
+            else:
+                for k_idx, (idx, prob) in enumerate(zip(topk_res.indices, topk_res.values)):
+                    rank = k_idx + 1
+                    species_name = self.format_name(*target_names[idx.item()])
+                    row[f"Top{rank}_Species"] = species_name
+                    row[f"Top{rank}_Prob"] = round(prob.item(), 4)
 
-            for k in range(self.topk):
+            # Fill in the rest with empty
+            for k_idx in range(k, self.topk):
+                rank = k_idx + 1
+                row[f"Top{rank}_Species"] = ""
+                row[f"Top{rank}_Prob"] = 0.0
+
+            for k in range(len(topk_res.indices), self.topk):
                 rank = k + 1
-                if k < len(predictions):
-                    pred = predictions[k]
-                    row[f"Top{rank}_Species"] = pred.name
-                    row[f"Top{rank}_Prob"] = round(pred.accuracy, 4)
-                else:
-                    row[f"Top{rank}_Species"] = ""
-                    row[f"Top{rank}_Prob"] = 0.0
+                row[f"Top{rank}_Species"] = ""
+                row[f"Top{rank}_Prob"] = 0.0
 
             row["Inference_Time(ms)"] = round(inference_ms, 2)
             return row
@@ -199,16 +238,9 @@ class ClassifierTester:
             print(f"  [ERROR] {img_path.name}: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    # CSV Output
-    # ------------------------------------------------------------------
-
     def _save_csv(self, results: list[dict], csv_path: Path) -> None:
-        """분류 결과를 CSV로 저장한다."""
         if not results:
-            print("[WARNING] No results to save.")
             return
-
         fieldnames = ["Image_Name"]
         for k in range(1, self.topk + 1):
             fieldnames += [f"Top{k}_Species", f"Top{k}_Prob"]
@@ -218,26 +250,17 @@ class ClassifierTester:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(results)
-
         print(f"[Save] Classification log -> {csv_path}")
-
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _print_summary(results: list[dict]) -> None:
         if not results:
             return
-
         n = len(results)
         probs = [r.get("Top1_Prob", 0) for r in results]
         times = [r.get("Inference_Time(ms)", 0) for r in results]
-
         avg_prob = sum(probs) / n
         avg_time = sum(times) / n
-
-        # 가장 자주 등장하는 Top-1 종
         from collections import Counter
         species_counts = Counter(r.get("Top1_Species", "") for r in results)
         top_species = species_counts.most_common(5)
@@ -254,14 +277,7 @@ class ClassifierTester:
             print(f"    - {species}: {count} ({pct:.1f}%)")
         print(f"{'='*60}\n")
 
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
     def cleanup(self) -> None:
-        """GPU 메모리 및 모델 리소스 해제."""
-        if hasattr(self, "classifier"):
-            self.classifier.cleanup()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             print("[ClassifierTester] GPU memory released.")
