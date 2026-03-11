@@ -1,7 +1,7 @@
 """
 Divery Vision Pipeline - Safeguard: 중복 제거 모듈
 ===================================================
-Fishial v10 임베딩 기반으로 동일 개체의 반복 스냅샷을 제거한다.
+BioCLIP-2 임베딩 기반으로 동일 개체의 반복 스냅샷을 제거한다.
 
   EmbeddingDeduplicator : 저장 전 실시간 중복 필터링
   FinalDeduplicator     : 저장 후 ID 병합 (후처리)
@@ -15,18 +15,15 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 from PIL import Image
 from torchvision import transforms
 
-# fishial_model/ 내 inference.py 임포트
-sys.path.insert(0, str(Path(__file__).parent / "fishial_model"))
-from inference import EmbeddingClassifier  # noqa: E402
-
 
 class EmbeddingDeduplicator:
     """
-    Fishial v10 임베딩 기반 중복 제거기.
+    BioCLIP-2 임베딩 기반 중복 제거기.
 
     저장 전 각 best-shot 크롭의 임베딩을 추출하고,
     기존 저장된 이미지들과 cosine similarity를 비교하여
@@ -35,39 +32,44 @@ class EmbeddingDeduplicator:
 
     def __init__(
         self,
-        classifier: Optional[EmbeddingClassifier] = None,
+        classifier: Optional[any] = None,
         config_path: str = "config.yaml",
         similarity_threshold: float = 0.85,
     ) -> None:
         self.threshold = similarity_threshold
 
-        # 모델 로드 (외부에서 공유 가능)
+        # 모델 로드 (외부에서 공유 가능) - 예: ClassifierTester 인스턴스
         if classifier is not None:
-            self.classifier = classifier
+            self.model = classifier.model
+            self.preprocess = classifier.preprocess
+            self.device = classifier.device
             self._owns_classifier = False
         else:
             config = self._load_config(config_path)
-            cls_cfg = config["classifier"]
-            ec_config = {
-                "log_level": "WARNING",
-                "dataset": {"path": cls_cfg["database_path"]},
-                "model": {
-                    "checkpoint_path": cls_cfg["checkpoint_path"],
-                    "backbone_model_name": cls_cfg.get("backbone_model_name", "maxvit_base_tf_224"),
-                    "embedding_dim": cls_cfg.get("embedding_dim", 512),
-                    "num_classes": cls_cfg.get("num_classes", 775),
-                    "arcface_s": cls_cfg.get("arcface_s", 64.0),
-                    "arcface_m": cls_cfg.get("arcface_m", 0.2),
-                    "pooling_type": cls_cfg.get("pooling_type", "attention"),
-                    "input_size": cls_cfg.get("input_size", 224),
-                    "device": cls_cfg.get("device", "cuda:0"),
-                },
-                "use_knn": False,  # 임베딩만 필요, kNN 불필요
-            }
-            self.classifier = EmbeddingClassifier(ec_config)
+            cls_cfg = config.get("classifier", {})
+            try:
+                from open_clip import create_model
+            except ImportError:
+                print("❌ open_clip_torch is not installed.")
+                sys.exit(1)
+
+            self.device = torch.device(cls_cfg.get("device", "cuda:0") if torch.cuda.is_available() else "cpu")
+            self.model_str = cls_cfg.get("model_str", "hf-hub:imageomics/bioclip-2")
+            print(f"[Deduplicator] Loading {self.model_str} for embeddings...")
+            
+            self.model = create_model(self.model_str, output_dict=True, require_pretrained=True).to(self.device)
+            self.model.eval()
+
+            self.preprocess = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Resize((224, 224), antialias=True),
+                transforms.Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ])
             self._owns_classifier = True
 
-        self.device = next(self.classifier.model.parameters()).device
         print(f"[Deduplicator] Initialized (threshold={self.threshold})")
 
     @staticmethod
@@ -81,24 +83,25 @@ class EmbeddingDeduplicator:
 
     def compute_embedding(self, img_bgr: np.ndarray) -> np.ndarray:
         """
-        BGR 이미지에서 512차원 L2-normalized 임베딩을 추출한다.
+        BGR 이미지에서 L2-normalized 임베딩을 추출한다. (BioCLIP-2는 768차원)
 
         Args:
             img_bgr: BGR numpy array.
 
         Returns:
-            (512,) float32 numpy array.
+            float32 numpy array.
         """
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
         # torchvision transform
         pil_img = Image.fromarray(img_rgb)
-        tensor = self.classifier.transform(pil_img).unsqueeze(0).to(self.device)
+        tensor = self.preprocess(pil_img).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            embedding, _, _ = self.classifier.model(tensor, return_softmax=False)
+            img_features = self.model.encode_image(tensor)
+            img_features = F.normalize(img_features, dim=-1)
 
-        return embedding.cpu().numpy().flatten()
+        return img_features.cpu().numpy().flatten()
 
     # ------------------------------------------------------------------
     # Cosine similarity
@@ -191,8 +194,8 @@ class EmbeddingDeduplicator:
     # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
-        if self._owns_classifier:
-            self.classifier.cleanup()
+        if self._owns_classifier and hasattr(self, 'model'):
+            del self.model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

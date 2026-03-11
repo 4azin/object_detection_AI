@@ -4,7 +4,7 @@ Divery Vision Pipeline - Integrated Web UI
 Gradio 기반 통합 웹 인터페이스.
 Step 1: 영상 업로드 -> ByteTrack 추적 -> Best-Shot 추출
 Step 2: Best-Shot 갤러리 확인
-Step 3: Fishial.AI 어종 분류
+Step 3: BioCLIP-2 어종 분류
 
 사용법:
     conda activate diveary-vision
@@ -286,14 +286,23 @@ def _build_extraction_summary(saved: dict, video_path: str, n_raw: int = 0, n_de
 # ──────────────────────────────────────────────
 def step2_classify(
     best_shots_path: str,
+    classification_mode: str,
+    zero_shot_classes: str,
     progress=gr.Progress(track_tqdm=True),
 ):
-    """Classify all best-shot images with Fishial.AI."""
+    """Classify all best-shot images with BioCLIP-2."""
     if not best_shots_path or not Path(best_shots_path).exists():
         raise gr.Error("No best-shots found. Please run Step 1 first.")
 
+    mode = "open-domain" if "Open-Domain" in classification_mode else "zero-shot"
+    custom_classes = []
+    if mode == "zero-shot":
+        if not zero_shot_classes.strip():
+            raise gr.Error("Please provide candidate species for Zero-Shot mode.")
+        custom_classes = [c.strip() for c in zero_shot_classes.split("\n") if c.strip()]
+
     classifier = _get_classifier()
-    results = classifier.run(best_shots_path)
+    results = classifier.run(best_shots_path, mode=mode, custom_classes=custom_classes)
 
     if not results:
         return None, "<p>No classification results.</p>", []
@@ -490,7 +499,7 @@ def create_ui() -> gr.Blocks:
         gr.HTML("""
         <div class="main-header">
             <h1>Divery Vision Pipeline</h1>
-            <p>CFD Detector (YOLOv12x) + ByteTrack + Fishial.AI (v10.0, 755 Species)</p>
+            <p>CFD Detector (YOLOv12x) + ByteTrack + BioCLIP-2 (TreeOfLife-200M)</p>
         </div>
         """)
 
@@ -560,16 +569,30 @@ def create_ui() -> gr.Blocks:
                 )
 
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # Tab 2: Fishial.AI Classification
+            # Tab 2: BioCLIP-2 Classification
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             with gr.Tab("Step 2: Species Classification"):
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=1):
                         gr.Markdown("### Classify Best-Shots")
-                        gr.Markdown(
-                            "Fishial.AI v10.0 (755 species)\n\n"
-                            "ArcFace + kNN hybrid inference"
+                        
+                        classify_mode = gr.Radio(
+                            choices=["🌊 Open-Domain (TreeOfLife-200M)", "🎯 Zero-Shot (Custom List)"],
+                            value="🌊 Open-Domain (TreeOfLife-200M)",
+                            label="Classification Mode",
                         )
+                        zs_classes = gr.Textbox(
+                            label="Zero-Shot Candidates",
+                            placeholder="Amphiprion ocellaris (Clownfish)\nParacanthurus hepatus (Blue Tang)\nZebrasoma flavescens (Yellow Tang)",
+                            lines=5,
+                            info="Required for Zero-Shot. Separated by newlines.",
+                            visible=False,
+                        )
+
+                        def toggle_zs_input(mode):
+                            return gr.update(visible="Zero-Shot" in mode)
+                        classify_mode.change(fn=toggle_zs_input, inputs=classify_mode, outputs=zs_classes)
+
                         classify_btn = gr.Button(
                             "Start Classification",
                             variant="primary", size="lg",
@@ -595,7 +618,7 @@ def create_ui() -> gr.Blocks:
 
                 classify_btn.click(
                     fn=step2_classify,
-                    inputs=[best_shots_state],
+                    inputs=[best_shots_state, classify_mode, zs_classes],
                     outputs=[classify_table, classify_summary, classify_gallery, gpu_info_2],
                 )
 
