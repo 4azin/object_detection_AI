@@ -394,7 +394,13 @@ def step2_classify(
     if not best_shots_path or not Path(best_shots_path).exists():
         raise gr.Error("No best-shots found. Please run Step 1 first.")
 
-    mode = "open-domain" if "Open-Domain" in classification_mode else "zero-shot"
+    if "Open-Domain" in classification_mode:
+        mode = "open-domain"
+    elif "Zero-Shot" in classification_mode:
+        mode = "zero-shot"
+    elif "Two-Stage" in classification_mode:
+        mode = "two-stage"
+        
     custom_classes = []
     if mode == "zero-shot":
         if not zero_shot_classes.strip():
@@ -738,7 +744,7 @@ def create_ui() -> gr.Blocks:
                         gr.Markdown("### Classify Best-Shots")
                         
                         classify_mode = gr.Radio(
-                            choices=["🌊 Open-Domain (TreeOfLife-200M)", "🎯 Zero-Shot (Custom List)"],
+                            choices=["🌊 Open-Domain (TreeOfLife-200M)", "🎯 Zero-Shot (Custom List)", "🧬 Two-Stage (Family -> Species)"],
                             value="🌊 Open-Domain (TreeOfLife-200M)",
                             label="Classification Mode",
                         )

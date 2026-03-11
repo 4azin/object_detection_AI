@@ -93,10 +93,48 @@ class ClassifierTester:
         self.topk = cls_cfg.get("topk_results", 3)
         self.output_dir = Path(self.config.get("output", {}).get("output_dir", "./results"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Two-stage classification setup
+        self.bioinfo_file = Path("fish_bioinfo/taxon_data_filtered_keyword_matched.json")
+        self.family_to_species = collections.defaultdict(list)
+        self.family_names = []
+        self.family_emb = None
+        self._load_bioinfo()
 
         print(f"[ClassifierTester] Initialized")
         print(f"  - Device   : {self.device}")
         print(f"  - Top-K    : {self.topk}")
+        if self.family_names:
+            print(f"  - Families : {len(self.family_names)}")
+
+    def _load_bioinfo(self):
+        if not self.bioinfo_file.exists():
+            print(f"[WARNING] Bioinfo JSON not found at {self.bioinfo_file}. Two-stage mode will be unavailable.")
+            return
+            
+        print(f"[ClassifierTester] Loading Fish Bioinfo {self.bioinfo_file}...")
+        with open(self.bioinfo_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        for item in data:
+            family = item.get("Family")
+            family_kr = item.get("FamilyKR", "")
+            species = item.get("SpcScitfNm")
+            
+            if family and species:
+                # Store the family with both english and korean if available
+                family_label = f"{family} ({family_kr})" if family_kr else family
+                
+                # Append species
+                self.family_to_species[family_label].append(species)
+        
+        # Sort and extract unique families
+        self.family_names = sorted(list(self.family_to_species.keys()))
+        
+        # Precompute embeddings for families
+        if self.family_names:
+            print("[ClassifierTester] Precomputing Family text embeddings...")
+            self.family_emb = self.get_txt_features(self.family_names)
 
     def _warmup(self, num_iterations=3):
         dummy_input = torch.randn(1, 3, 224, 224).to(self.device)
@@ -160,6 +198,12 @@ class ClassifierTester:
                 target_txt_emb = self.get_txt_features(custom_classes)
                 # Store names as tuple similar to JSON format (e.g. ['Amphiprion ocellaris'], '')
                 target_names = [([cls], "") for cls in custom_classes]
+        elif mode == "two-stage":
+            if not self.family_names or self.family_emb is None:
+                print("[WARNING] Bioinfo JSON not loaded properly. Falling back to open-domain.")
+                mode = "open-domain"
+            else:
+                print("  Mode   : Two-stage (Family -> Species)")
 
         print(f"{'='*60}")
 
@@ -167,7 +211,11 @@ class ClassifierTester:
 
         with tqdm(image_files, desc="[Classify]", unit="img") as pbar:
             for img_path in pbar:
-                result = self._classify_single(img_path, target_txt_emb, target_names)
+                if mode == "two-stage":
+                    result = self._classify_two_stage(img_path)
+                else:
+                    result = self._classify_single(img_path, target_txt_emb, target_names)
+                    
                 if result is not None:
                     results.append(result)
                     pbar.set_postfix(
@@ -226,8 +274,73 @@ class ClassifierTester:
                 row[f"Top{rank}_Species"] = ""
                 row[f"Top{rank}_Prob"] = 0.0
 
-            for k in range(len(topk_res.indices), self.topk):
-                rank = k + 1
+            row["Inference_Time(ms)"] = round(inference_ms, 2)
+            return row
+
+        except Exception as e:
+            print(f"  [ERROR] {img_path.name}: {e}")
+            return None
+
+    @torch.no_grad()
+    def _classify_two_stage(self, img_path: Path) -> Optional[dict]:
+        try:
+            img_pil = Image.open(img_path).convert("RGB")
+            
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_start = time.perf_counter()
+
+            # 1. Encode Image
+            img_tensor = self.preprocess(img_pil).to(self.device)
+            img_features = self.model.encode_image(img_tensor.unsqueeze(0))
+            img_features = F.normalize(img_features, dim=-1)
+
+            # 2. Predict Family
+            logits_fam = (self.model.logit_scale.exp() * img_features @ self.family_emb).squeeze()
+            probs_fam = F.softmax(logits_fam, dim=0)
+            
+            top1_fam_idx = probs_fam.argmax().item()
+            pred_family = self.family_names[top1_fam_idx]
+            
+            # 3. Retrieve Candidate Species based on predicted Family
+            candidate_species = list(set(self.family_to_species[pred_family]))
+            
+            # 4. Predict Species (Zero-shot)
+            if not candidate_species:
+                # Fallback if somehow no species
+                candidate_emb = self.txt_emb
+                candidate_names = self.txt_names
+            else:
+                candidate_emb = self.get_txt_features(candidate_species)
+                candidate_names = [([cls], "") for cls in candidate_species]
+                
+            logits_spc = (self.model.logit_scale.exp() * img_features @ candidate_emb).squeeze()
+            probs_spc = F.softmax(logits_spc, dim=0)
+            
+            k = min(self.topk, len(probs_spc))
+            topk_res = probs_spc.topk(k)
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t_end = time.perf_counter()
+
+            inference_ms = (t_end - t_start) * 1000
+
+            row: dict = {"Image_Name": img_path.name}
+            row["Pred_Family"] = pred_family
+            
+            if k == 1 and logits_spc.dim() == 0:
+                row[f"Top1_Species"] = self.format_name(*candidate_names[0])
+                row[f"Top1_Prob"] = round(probs_spc.item(), 4)
+            else:
+                for k_idx, (idx, prob) in enumerate(zip(topk_res.indices, topk_res.values)):
+                    rank = k_idx + 1
+                    species_name = self.format_name(*candidate_names[idx.item()])
+                    row[f"Top{rank}_Species"] = species_name
+                    row[f"Top{rank}_Prob"] = round(prob.item(), 4)
+
+            for k_idx in range(k, self.topk):
+                rank = k_idx + 1
                 row[f"Top{rank}_Species"] = ""
                 row[f"Top{rank}_Prob"] = 0.0
 
@@ -242,6 +355,8 @@ class ClassifierTester:
         if not results:
             return
         fieldnames = ["Image_Name"]
+        if "Pred_Family" in results[0]:
+            fieldnames.append("Pred_Family")
         for k in range(1, self.topk + 1):
             fieldnames += [f"Top{k}_Species", f"Top{k}_Prob"]
         fieldnames.append("Inference_Time(ms)")
