@@ -15,8 +15,11 @@ GitHub/GitLab 등 코드 저장소의 용량 제한 및 버전 관리 효율성�
 | :--------------------- | :------------------------------------ | :-------- | :---------------------------------------------------------------------------------------------- |
 | `cfd-yolov12x-1.00.pt` | `CFD_fishial/`                        | 114 MB    | **CFD (Custom Fish Detector)**<br>수중 생물 탐지를 위한 메인 YOLOv12x 모델입니다.               |
 | `yolo11n.pt`           | `CFD_fishial/`                        | 5.4 MB    | **YOLOv11 Nano**<br>빠른 기본 객체 탐지를 위한 경량 모델입니다.                                 |
-| `model.ckpt`           | `CFD_fishial/fishial_model/`          | 331 MB    | **Fishial.AI 체급/종 분류 모델**<br>어종의 특징을 추출하고 분류하는 핵심 모델 체크포인트입니다. |
-| `database.pt`          | `CFD_fishial/fishial_model/`          | 137 MB    | **Fishial.AI kNN 임베딩 DB**<br>미리 계산된 755종의 어종 임베딩 데이터베이스입니다.             |
+| `model.ckpt`           | `CFD_fishial/fishial_model/`          | 331 MB    | **(Deprecated) Fishial.AI 체급/종 분류 모델**<br>어종의 특징을 추출하고 분류하는 구버전 핵심 모델 체크포인트입니다. |
+| `database.pt`          | `CFD_fishial/fishial_model/`          | 137 MB    | **(Deprecated) Fishial.AI kNN 임베딩 DB**<br>미리 계산된 755종의 어종 임베딩 데이터베이스입니다.             |
+
+> 💡 **최신 BioCLIP-2 관련 안내**<br>
+> 최신 버전의 파이프라인은 분류 단계에서 `BioCLIP-2 (ViT-L-14 / ViT-H-14)` 모델을 사용합니다. 해당 모델 가중치 파일들은 로컬에 직접 배치할 필요 없이, 파이프라인 최초 실행 시 **Hugging Face Hub를 통해 사용자 환경의 캐시 폴더 (`~/.cache/huggingface/hub`) 로 자동 다운로드** 됩니다. (초기 실행 시 인터넷 연결 필수)
 
 ---
 

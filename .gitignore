@@ -42,6 +42,7 @@ CFD_fishial/results/
 CFD_fishial/test_videos/
 zeroshot_test/output_frames/
 zeroshot_test/temp_frames/
+*.zip
 
 # =============================================
 #  영상/이미지 출력물

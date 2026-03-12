@@ -2,7 +2,7 @@
 
 > **수중 생물 탐지 · 추적 · 분류를 위한 AI 파이프라인**
 
-CFD(Custom Fish Detector) + ByteTrack 추적 + Fishial.AI 어종 분류를 통합한 Gradio 기반 웹 인터페이스입니다.
+CFD(Custom Fish Detector) + ByteTrack 추적 + BioCLIP-2 기반 다중 모드 어종 분류를 통합한 Gradio 기반 웹 인터페이스입니다.
 
 ---
 
@@ -114,8 +114,13 @@ python web_app.py
 
 #### 사용 흐름
 
-1. **Step 1** — 영상 업로드 → ByteTrack 추적 → Best-Shot 자동 추출
-2. **Step 2** — Best-Shot 이미지 → Fishial.AI 어종 분류 (Top-3)
+1. **Step 1** — 영상 업로드 → ByteTrack 추적 → Best-Shot 자동 추출 (압축 파일 다운로드 지원)
+2. **Step 2** — 추출된 이미지 선택 → BioCLIP-2 다중 모드 예측 적용
+   - **Open-Domain**: TreeOfLife-200M 임베딩을 이용한 기본 오픈 도메인 분류
+   - **Zero-Shot (Custom)**: 사용자가 입력한 종 목록 내에서만 분류
+   - **Zero-Shot (All Bioinfo List)**: 내부 JSON(`taxon_data...`)에 등록된 전 종 목록으로 분류
+   - **Two-Stage**: 과(Family) 예측 후 해당 과의 종(Species)들을 대상으로 분류
+   > 💡 예측 결과는 Top-3 학명과 함께 **한국어 일반명** 조합으로 반환됩니다. (예: `Acanthopagrus schlegelii (Blackhead seabream) [감성돔]`)
 
 #### 입력 제한 사항
 
