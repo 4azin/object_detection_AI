@@ -43,11 +43,16 @@ def _get_extractor() -> BestShotExtractor:
     return _extractor
 
 
-def _get_classifier():
+def _get_classifier(model_choice: str = "bioclip2"):
     global _classifier
+    if _classifier is not None and getattr(_classifier, "model_choice", None) != model_choice:
+        print(f"[web_app] Model choice changed to {model_choice}. Reloading classifier...")
+        _classifier.cleanup()
+        _classifier = None
+
     if _classifier is None:
         from classifier_tester import ClassifierTester
-        _classifier = ClassifierTester(config_path="config.yaml")
+        _classifier = ClassifierTester(config_path="config.yaml", model_choice=model_choice)
     return _classifier
 
 
@@ -197,7 +202,9 @@ def step1_extract(
     # Create ZIP for download
     zip_path = _create_best_shot_zip(extractor.best_shots_dir)
 
-    return gallery_items, summary, gpu_html, str(extractor.best_shots_dir), tracked_video, zip_path
+    files_list = [Path(merged[tid]["path"]).name for tid in sorted(merged.keys())] if merged else []
+
+    return gallery_items, summary, gpu_html, str(extractor.best_shots_dir), tracked_video, zip_path, gr.update(choices=files_list, value=files_list)
 
 
 def step1_extract_image(
@@ -297,7 +304,8 @@ def step1_extract_image(
     gpu_html = _build_gpu_info_html()
     zip_path = _create_best_shot_zip(extractor.best_shots_dir)
 
-    return gallery_items, summary, gpu_html, str(extractor.best_shots_dir), rendered_rgb, zip_path
+    files_list = [Path(saved[tid]["path"]).name for tid in sorted(saved.keys())] if saved else []
+    return gallery_items, summary, gpu_html, str(extractor.best_shots_dir), rendered_rgb, zip_path, gr.update(choices=files_list, value=files_list)
 
 
 def _create_best_shot_zip(best_shots_dir: Path) -> Optional[str]:
@@ -386,18 +394,26 @@ def _build_extraction_summary(saved: dict, video_path: str, n_raw: int = 0, n_de
 # ──────────────────────────────────────────────
 def step2_classify(
     best_shots_path: str,
+    selected_shots: list,
+    model_choice_ui: str,
     classification_mode: str,
     zero_shot_classes: str,
     progress=gr.Progress(track_tqdm=True),
 ):
-    """Classify all best-shot images with BioCLIP-2."""
+    """Classify all best-shot images with BioCLIP."""
     if not best_shots_path or not Path(best_shots_path).exists():
         raise gr.Error("No best-shots found. Please run Step 1 first.")
 
+    model_choice = "bioclip-2.5-vith14" if "2.5" in model_choice_ui else "bioclip2"
+
     if "Open-Domain" in classification_mode:
+        if model_choice == "bioclip-2.5-vith14":
+            raise gr.Error("BioCLIP-2.5 (ViT-H-14) does not currently support Open-Domain classification. The available TreeOfLife-200M embeddings only support BioCLIP-2 (768-dim). Please select Zero-Shot or Two-Stage mode, or change the Model back to BioCLIP-2.")
         mode = "open-domain"
-    elif "Zero-Shot" in classification_mode:
+    elif "Zero-Shot (Custom List)" in classification_mode:
         mode = "zero-shot"
+    elif "Zero-Shot (All Bioinfo List)" in classification_mode:
+        mode = "zero-shot-all"
     elif "Two-Stage" in classification_mode:
         mode = "two-stage"
         
@@ -407,71 +423,66 @@ def step2_classify(
             raise gr.Error("Please provide candidate species for Zero-Shot mode.")
         custom_classes = [c.strip() for c in zero_shot_classes.split("\n") if c.strip()]
 
-    classifier = _get_classifier()
-    results = classifier.run(best_shots_path, mode=mode, custom_classes=custom_classes)
+    # Filter files before passing to classifier
+    if not selected_shots:
+        return None, "<p>No images selected for classification.</p>", [], _build_gpu_info_html()
+
+    classifier = _get_classifier(model_choice)
+    results = classifier.run(best_shots_path, mode=mode, custom_classes=custom_classes, target_files=selected_shots)
 
     if not results:
-        return None, "<p>No classification results.</p>", []
+        return None, "<p>No classification results.</p>", [], _build_gpu_info_html()
 
     # Build DataFrame
     df = pd.DataFrame(results)
 
-    # Build comparison gallery: each image with its Top-3 species annotation
-    comparison_items = []
+    # Build comparison gallery: image alongside Top-3 species annotation in HTML
+    import base64
+    
+    html_items = []
     for row in results:
         img_path = Path(best_shots_path) / row["Image_Name"]
         if img_path.exists():
-            img = cv2.imread(str(img_path))
-            if img is not None:
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                # Annotate with Top-3
-                annotated = _annotate_classification(img_rgb, row)
-                label = (
-                    f"{row['Image_Name']}\n"
-                    f"1st: {row['Top1_Species']} ({row['Top1_Prob']:.3f})\n"
-                    f"2nd: {row['Top2_Species']} ({row['Top2_Prob']:.3f})\n"
-                    f"3rd: {row['Top3_Species']} ({row['Top3_Prob']:.3f})"
-                )
-                comparison_items.append((annotated, label))
+            with open(img_path, "rb") as f:
+                encoded_string = base64.b64encode(f.read()).decode()
+            
+            img_src = f"data:image/jpeg;base64,{encoded_string}"
+            
+            item_html = f"""
+            <div style="display: flex; align-items: center; background: rgba(255,255,255,0.05); padding: 12px; border-radius: 12px; margin-bottom: 12px;">
+                <img src="{img_src}" style="width: 150px; height: 150px; object-fit: contain; border-radius: 8px; margin-right: 20px;" />
+                <div style="flex: 1; font-family: 'Segoe UI', sans-serif; color: #e0e0e0;">
+                    <h4 style="margin: 0 0 8px 0; color: #a29bfe; font-size: 16px;">{row['Image_Name']}</h4>
+                    <div style="font-size: 14px; margin-bottom: 4px;">
+                        <span style="display: inline-block; width: 30px; font-weight: bold; color: #00d2ff;">1st</span>
+                        <span style="font-weight: 500;">{row.get('Top1_Species', '')}</span>
+                        <span style="color: #aaa; margin-left: 8px;">({row.get('Top1_Prob', 0):.3f})</span>
+                    </div>
+                    <div style="font-size: 14px; margin-bottom: 4px;">
+                        <span style="display: inline-block; width: 30px; font-weight: bold; color: #ffd93d;">2nd</span>
+                        <span>{row.get('Top2_Species', '')}</span>
+                        <span style="color: #aaa; margin-left: 8px;">({row.get('Top2_Prob', 0):.3f})</span>
+                    </div>
+                    <div style="font-size: 14px;">
+                        <span style="display: inline-block; width: 30px; font-weight: bold; color: #ff9f43;">3rd</span>
+                        <span>{row.get('Top3_Species', '')}</span>
+                        <span style="color: #aaa; margin-left: 8px;">({row.get('Top3_Prob', 0):.3f})</span>
+                    </div>
+                </div>
+            </div>
+            """
+            html_items.append(item_html)
+            
+    final_list_html = f"""
+    <div style="max-height: 600px; overflow-y: auto; padding-right: 10px;">
+        {''.join(html_items)}
+    </div>
+    """
 
     summary_html = _build_classification_summary(results)
     gpu_html = _build_gpu_info_html()
 
-    return df, summary_html, comparison_items, gpu_html
-
-
-def _annotate_classification(img_rgb: np.ndarray, row: dict) -> np.ndarray:
-    """Draw Top-3 species labels on the image."""
-    h, w = img_rgb.shape[:2]
-    # Scale for readability
-    scale = max(1.0, min(w, h) / 200)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    thickness = max(1, int(scale))
-    font_scale = 0.45 * scale
-
-    # Convert to BGR for OpenCV drawing, then back
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-
-    # Draw semi-transparent overlay at bottom
-    overlay_h = int(70 * scale)
-    overlay = img_bgr.copy()
-    cv2.rectangle(overlay, (0, h - overlay_h), (w, h), (0, 0, 0), -1)
-    img_bgr = cv2.addWeighted(overlay, 0.7, img_bgr, 0.3, 0)
-
-    colors = [(0, 255, 200), (0, 200, 255), (200, 200, 200)]  # BGR: cyan, yellow, gray
-    y_start = h - overlay_h + int(18 * scale)
-
-    for k in range(3):
-        rank = k + 1
-        species = row.get(f"Top{rank}_Species", "")
-        prob = row.get(f"Top{rank}_Prob", 0.0)
-        if species:
-            text = f"{rank}. {species} ({prob:.2f})"
-            y_pos = y_start + int(k * 20 * scale)
-            cv2.putText(img_bgr, text, (int(5 * scale), y_pos),
-                        font, font_scale, colors[k], thickness, cv2.LINE_AA)
-
-    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    return df, summary_html, final_list_html, gpu_html
 
 
 def _build_classification_summary(results: list[dict]) -> str:
@@ -664,18 +675,7 @@ def create_ui() -> gr.Blocks:
                                             object_fit="contain",
                                         )
 
-                        extract_btn.click(
-                            fn=step1_extract,
-                            inputs=[video_input, conf_slider, fp16_check],
-                            outputs=[extract_gallery, extract_summary, gpu_info_1, best_shots_state, tracked_video_output, zip_download],
-                        )
 
-                        download_btn.click(
-                            fn=step1_download_zip,
-                            inputs=[best_shots_state],
-                            outputs=[zip_download],
-                        )
-                    
                     with gr.Tab("Image Detection"):
                         with gr.Row(equal_height=False):
                             with gr.Column(scale=1):
@@ -723,18 +723,6 @@ def create_ui() -> gr.Blocks:
                                             object_fit="contain",
                                         )
 
-                        img_extract_btn.click(
-                            fn=step1_extract_image,
-                            inputs=[image_input, img_conf_slider, img_fp16_check],
-                            outputs=[img_extract_gallery, img_extract_summary, img_gpu_info_1, best_shots_state, detected_image_output, img_zip_download],
-                        )
-
-                        img_download_btn.click(
-                            fn=step1_download_zip,
-                            inputs=[best_shots_state],
-                            outputs=[img_zip_download],
-                        )
-
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # Tab 2: BioCLIP-2 Classification
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -743,8 +731,14 @@ def create_ui() -> gr.Blocks:
                     with gr.Column(scale=1):
                         gr.Markdown("### Classify Best-Shots")
                         
+                        model_dropdown = gr.Dropdown(
+                            choices=["BioCLIP-2 (ViT-L-14)", "BioCLIP-2.5 (ViT-H-14)"],
+                            value="BioCLIP-2 (ViT-L-14)",
+                            label="Classification Model",
+                        )
+
                         classify_mode = gr.Radio(
-                            choices=["🌊 Open-Domain (TreeOfLife-200M)", "🎯 Zero-Shot (Custom List)", "🧬 Two-Stage (Family -> Species)"],
+                            choices=["🌊 Open-Domain (TreeOfLife-200M)", "🎯 Zero-Shot (Custom List)", "📚 Zero-Shot (All Bioinfo List)", "🧬 Two-Stage (Family -> Species)"],
                             value="🌊 Open-Domain (TreeOfLife-200M)",
                             label="Classification Mode",
                         )
@@ -757,8 +751,14 @@ def create_ui() -> gr.Blocks:
                         )
 
                         def toggle_zs_input(mode):
-                            return gr.update(visible="Zero-Shot" in mode)
+                            return gr.update(visible=mode == "🎯 Zero-Shot (Custom List)")
                         classify_mode.change(fn=toggle_zs_input, inputs=classify_mode, outputs=zs_classes)
+
+                        selected_shots_cb = gr.CheckboxGroup(
+                            label="Target Images",
+                            info="Select the Best-Shots you want to classify",
+                            choices=[],
+                        )
 
                         classify_btn = gr.Button(
                             "Start Classification",
@@ -768,12 +768,9 @@ def create_ui() -> gr.Blocks:
 
                     with gr.Column(scale=2):
                         classify_summary = gr.HTML(label="Classification Summary")
-                        gr.Markdown("### Species Comparison (Top-3 annotated)")
-                        classify_gallery = gr.Gallery(
-                            label="Classification Results",
-                            columns=3,
-                            height=520,
-                            object_fit="contain",
+                        gr.Markdown("### Species Comparison")
+                        classify_results_html = gr.HTML(
+                            label="Classification Results"
                         )
 
                 with gr.Accordion("Detailed Classification Log (CSV)", open=False):
@@ -785,9 +782,36 @@ def create_ui() -> gr.Blocks:
 
                 classify_btn.click(
                     fn=step2_classify,
-                    inputs=[best_shots_state, classify_mode, zs_classes],
-                    outputs=[classify_table, classify_summary, classify_gallery, gpu_info_2],
+                    inputs=[best_shots_state, selected_shots_cb, model_dropdown, classify_mode, zs_classes],
+                    outputs=[classify_table, classify_summary, classify_results_html, gpu_info_2],
                 )
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Event Bindings for Step 1 cross-references
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        extract_btn.click(
+            fn=step1_extract,
+            inputs=[video_input, conf_slider, fp16_check],
+            outputs=[extract_gallery, extract_summary, gpu_info_1, best_shots_state, tracked_video_output, zip_download, selected_shots_cb],
+        )
+
+        download_btn.click(
+            fn=step1_download_zip,
+            inputs=[best_shots_state],
+            outputs=[zip_download],
+        )
+
+        img_extract_btn.click(
+            fn=step1_extract_image,
+            inputs=[image_input, img_conf_slider, img_fp16_check],
+            outputs=[img_extract_gallery, img_extract_summary, img_gpu_info_1, best_shots_state, detected_image_output, img_zip_download, selected_shots_cb],
+        )
+
+        img_download_btn.click(
+            fn=step1_download_zip,
+            inputs=[best_shots_state],
+            outputs=[img_zip_download],
+        )
 
     return demo
 

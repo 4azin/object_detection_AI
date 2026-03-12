@@ -8,6 +8,10 @@ import csv
 import json
 import os
 import sys
+
+# Suppress Hugging Face symlinks warning on Windows
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 import time
 import collections
 import heapq
@@ -36,14 +40,21 @@ class ClassifierTester:
     BioCLIP-2 임베딩 분류기 클래스.
     """
 
-    def __init__(self, config_path: str = "config.yaml") -> None:
+    def __init__(self, config_path: str = "config.yaml", model_choice: str = "bioclip2") -> None:
         self.config = self._load_config(config_path)
         cls_cfg = self.config.get("classifier", {})
 
-        print("[ClassifierTester] Loading BioCLIP-2 model...")
+        self.model_choice = model_choice
+        print(f"[ClassifierTester] Loading BioCLIP model ({model_choice})...")
         self.device = torch.device(cls_cfg.get("device", "cuda:0") if torch.cuda.is_available() else "cpu")
-        self.model_str = cls_cfg.get("model_str", "hf-hub:imageomics/bioclip-2")
-        self.tokenizer_str = cls_cfg.get("tokenizer_str", "ViT-L-14")
+        
+        if model_choice == "bioclip-2.5-vith14":
+            self.model_str = "hf-hub:imageomics/bioclip-2.5-vith14"
+            self.tokenizer_str = "hf-hub:imageomics/bioclip-2.5-vith14"
+        else:
+            self.model_str = cls_cfg.get("model_str", "hf-hub:imageomics/bioclip-2")
+            self.tokenizer_str = cls_cfg.get("tokenizer_str", "ViT-L-14")
+            
         self.hf_data_str = cls_cfg.get("hf_data_str", "imageomics/TreeOfLife-200M")
 
         self.model = create_model(self.model_str, output_dict=True, require_pretrained=True)
@@ -72,19 +83,23 @@ class ClassifierTester:
             lambda c: f"a photo of a small {c}.",
         ]
 
-        print("[ClassifierTester] Downloading TreeOfLife-200M embeddings...")
-        self.txt_emb = torch.from_numpy(np.load(hf_hub_download(
-            repo_id=self.hf_data_str,
-            filename="embeddings/txt_emb_species.npy",
-            repo_type="dataset",
-        ))).to(self.device)
+        if self.model_choice != "bioclip-2.5-vith14":
+            print("[ClassifierTester] Downloading/Loading TreeOfLife-200M embeddings (768-dim)...")
+            self.txt_emb = torch.from_numpy(np.load(hf_hub_download(
+                repo_id=self.hf_data_str,
+                filename="embeddings/txt_emb_species.npy",
+                repo_type="dataset",
+            ))).to(self.device)
 
-        with open(hf_hub_download(
-            repo_id=self.hf_data_str,
-            filename="embeddings/txt_emb_species.json",
-            repo_type="dataset",
-        ), encoding="utf-8") as fd:
-            self.txt_names = json.load(fd)
+            with open(hf_hub_download(
+                repo_id=self.hf_data_str,
+                filename="embeddings/txt_emb_species.json",
+                repo_type="dataset",
+            ), encoding="utf-8") as fd:
+                self.txt_names = json.load(fd)
+        else:
+            self.txt_emb = None
+            self.txt_names = None
 
         # Warmup for stable GPU timing
         print("[ClassifierTester] GPU warmup...")
@@ -97,6 +112,7 @@ class ClassifierTester:
         # Two-stage classification setup
         self.bioinfo_file = Path("fish_bioinfo/taxon_data_filtered_keyword_matched.json")
         self.family_to_species = collections.defaultdict(list)
+        self.scientific_to_common = {}
         self.family_names = []
         self.family_emb = None
         self._load_bioinfo()
@@ -119,14 +135,26 @@ class ClassifierTester:
         for item in data:
             family = item.get("Family")
             family_kr = item.get("FamilyKR", "")
-            species = item.get("SpcScitfNm")
+            species_full = item.get("SpcScitfNm")
+            comm_kor_nm = item.get("CommKorNm", "")
             
-            if family and species:
+            if family and species_full:
+                # Extract binomial name (first two words) to match BioCLIP format
+                parts = species_full.split()
+                if len(parts) >= 2:
+                    species = f"{parts[0]} {parts[1]}"
+                else:
+                    species = species_full
+
                 # Store the family with both english and korean if available
                 family_label = f"{family} ({family_kr})" if family_kr else family
                 
                 # Append species
                 self.family_to_species[family_label].append(species)
+                
+                # Store korean common name mapping
+                if comm_kor_nm:
+                    self.scientific_to_common[species] = comm_kor_nm
         
         # Sort and extract unique families
         self.family_names = sorted(list(self.family_to_species.keys()))
@@ -150,12 +178,21 @@ class ClassifierTester:
         with open(cfg, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
 
-    @staticmethod
-    def format_name(taxon, common):
+    def format_name(self, taxon, common):
         taxon_str = " ".join(taxon)
-        if not common:
-            return taxon_str
-        return f"{taxon_str} ({common})"
+        
+        # Lookup Korean common name
+        kor_nm = self.scientific_to_common.get(taxon_str, "")
+        
+        # Build base name
+        base_name = taxon_str
+        if common:
+            base_name = f"{taxon_str} ({common})"
+            
+        # Append Korean name if it exists
+        if kor_nm:
+            return f"{base_name} [{kor_nm}]"
+        return base_name
 
     @torch.no_grad()
     def get_txt_features(self, classnames):
@@ -169,7 +206,7 @@ class ClassifierTester:
             all_features.append(txt_features)
         return torch.stack(all_features, dim=1)
 
-    def run(self, image_dir: str, mode: str = "open-domain", custom_classes: Optional[list[str]] = None) -> list[dict]:
+    def run(self, image_dir: str, mode: str = "open-domain", custom_classes: Optional[list[str]] = None, target_files: Optional[list[str]] = None) -> list[dict]:
         image_dir = Path(image_dir)
         if not image_dir.exists():
             print(f"[WARNING] Image dir not found: {image_dir}")
@@ -177,6 +214,9 @@ class ClassifierTester:
 
         extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         image_files = sorted(f for f in image_dir.iterdir() if f.suffix.lower() in extensions)
+        
+        if target_files is not None:
+            image_files = [f for f in image_files if f.name in target_files]
 
         if not image_files:
             print(f"[WARNING] No images found in: {image_dir}")
@@ -189,6 +229,10 @@ class ClassifierTester:
         target_txt_emb = self.txt_emb
         target_names = self.txt_names
         
+        if mode == "open-domain" and self.model_choice == "bioclip-2.5-vith14":
+            print("[ERROR] BioCLIP-2.5 (ViT-H-14) does not currently support Open-Domain classification because the 1024-dim TreeOfLife-200M embeddings are not yet available. Please use Zero-Shot or Two-Stage classification.")
+            raise ValueError("BioCLIP-2.5 does not currently support Open-Domain classification.")
+            
         if mode == "zero-shot":
             if not custom_classes:
                 print("[WARNING] Zero-shot mode requires custom_classes. Falling back to open-domain.")
@@ -197,6 +241,15 @@ class ClassifierTester:
                 print(f"  Classes: {len(custom_classes)} custom species")
                 target_txt_emb = self.get_txt_features(custom_classes)
                 # Store names as tuple similar to JSON format (e.g. ['Amphiprion ocellaris'], '')
+                target_names = [([cls], "") for cls in custom_classes]
+        elif mode == "zero-shot-all":
+            if not self.scientific_to_common:
+                print("[WARNING] Bioinfo JSON not loaded properly. Falling back to open-domain.")
+                mode = "open-domain"
+            else:
+                custom_classes = list(self.scientific_to_common.keys())
+                print(f"  Classes: {len(custom_classes)} species from Bioinfo JSON")
+                target_txt_emb = self.get_txt_features(custom_classes)
                 target_names = [([cls], "") for cls in custom_classes]
         elif mode == "two-stage":
             if not self.family_names or self.family_emb is None:
