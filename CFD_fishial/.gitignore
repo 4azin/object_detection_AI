@@ -1,0 +1,55 @@
+# =============================================================
+#  Divery Vision Pipeline — .gitignore
+# =============================================================
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── 가상환경 ──────────────────────────────────────────────────
+.env
+.venv/
+venv/
+env/
+
+# ── IDE / Editor ──────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS 생성 파일 ──────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# ── 모델 가중치 (대용량, Git 추적 X) ─────────────────────────
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+
+# ── Species Pipeline 산출물 (재생성 가능) ─────────────────────
+species_pipeline/outputs/
+species_pipeline/data/result_bioinfo.json
+species_pipeline/data/korea_seacreatureCSV.xlsx
+
+# ── Scoring Engine 산출물 ─────────────────────────────────────
+scoring_engine/prior_*.csv
+scoring_engine/*.json
+
+# ── fish_bioinfo 원본 데이터 (대용량) ─────────────────────────
+fish_bioinfo/result_bioinfo.json
+fish_bioinfo/korea_seacreatureCSV.xlsx
+fish_bioinfo/*.json
+
+# ── Best-Shot 다운로드 ZIP ────────────────────────────────────
+*.zip
+
+# ── 기타 ──────────────────────────────────────────────────────
+*.log

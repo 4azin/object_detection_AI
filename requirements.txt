@@ -54,6 +54,13 @@ realesrgan
 basicsr
 
 # -------------------------------------------------------------
+#  Species Pipeline (species_pipeline/)
+#  MBRIS → BioCLIP Matching → Synonym Resolution → OBIS Fetch
+# -------------------------------------------------------------
+# requests          (이미 Utilities 섹션에 포함)
+# huggingface_hub   (이미 BioCLIP-2 섹션에 포함)
+
+# -------------------------------------------------------------
 #  Utilities
 # -------------------------------------------------------------
 PyYAML==6.0.3
