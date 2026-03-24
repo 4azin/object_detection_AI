@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Runtime output
+worker.log
+worker.pid
+*.log
+
+# Temporary directories
+/tmp/
+/workdir/
+
+# Environment files (secrets)
+.env
+.env.*
+# But allow .env.example for documentation
+!.env.example
+
+# Custom Scripts
+scripts/package-lite-windows.py

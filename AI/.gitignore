@@ -1,0 +1,30 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# runtime output
+worker.log
+worker.pid
+dist/
+*.log
+
+# CFD runtime artifacts
+CFD_fishial/results/
+CFD_fishial/test_videos/
+
+# model weights (managed outside git)
+CFD_fishial/*.pt
+CFD_fishial/*.ckpt
+CFD_fishial/fishial_model/
+
+# Environment files (secrets)
+.env
+**/.env
+.env.*
+**/.env.*
+# But allow .env.example for documentation
+!.env.example
+!**/.env.example

@@ -1,0 +1,43 @@
+# ============================================================
+# Divery Vision Pipeline - 통합 설정 파일
+# ============================================================
+
+# --- Module A: CFD Detector ---
+model:
+  weights: "cfd-yolov12x-1.00.pt"
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  img_size: 640
+  half: true
+
+input:
+  video_dir: "./test_videos"
+  extensions:
+    - ".mp4"
+    - ".mov"
+
+output:
+  output_dir: "./results"
+  save_video: true
+  csv_filename: "detection_log.csv"
+
+# --- Module A-2: ByteTrack Best-Shot ---
+tracker:
+  tracker_type: "bytetrack_custom.yaml"
+  confidence_threshold: 0.5
+  best_shots_dir: "./results/best_shots"
+
+# --- Module B: BioCLIP-2 Classifier ---
+classifier:
+  model_str: "hf-hub:imageomics/bioclip-2"
+  tokenizer_str: "ViT-L-14"
+  hf_data_str: "imageomics/TreeOfLife-200M"
+  device: "cuda:0"
+  topk_results: 3
+  csv_filename: "classification_log.csv"
+
+# --- Safeguard: 중복 제거 ---
+safeguard:
+  embedding_similarity_threshold: 0.85 # pre-save dedup threshold
+  merge_frame_gap: 150 # frame 간격 이하면 병합 후보
+  merge_similarity_threshold: 0.80 # post-process merge threshold
